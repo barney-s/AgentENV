@@ -13,4 +13,5 @@ Living understanding and architecture documentation of the AgentENV repository.
 - **[runbooks/deploy-in-pod.md](runbooks/deploy-in-pod.md)** (Updated: Sept 23, 2026) — Local multi-node Docker Compose simulated stack deployment runbook.
 - **[runbooks/upgrade-in-pod.md](runbooks/upgrade-in-pod.md)** (Updated: Sept 23, 2026) — Local multi-node Docker Compose simulated stack upgrade runbook.
 - **[runbooks/deploy-gcp.md](runbooks/deploy-gcp.md)** (Updated: Sept 23, 2026) — Production GKE/GCP multi-node cluster deployment runbook.
+- **[runbooks/deploy-gcevm.md](runbooks/deploy-gcevm.md)** (Updated: Sept 23, 2026) — Single-node GCE VM bare-metal manual compilation and deployment runbook.
 - **[runbooks/upgrade-gcp.md](runbooks/upgrade-gcp.md)** (Updated: Sept 23, 2026) — Production GKE/GCP multi-node cluster upgrade runbook.
