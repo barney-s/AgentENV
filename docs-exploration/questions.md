@@ -23,3 +23,13 @@ During exploration of the AgentENV codebase, a few architectural nuances and ope
 - **Code Reference**: `src/p2p/`
 - **Ambiguity**: The snapshot manager utilizes Iroh for peer-to-peer snapshot replication.
 - **Question**: When replicating large memory/filesystem layers across hundreds of nodes, is there support for topology or rack-awareness? Without it, high-throughput peer transfers might saturate core switches during massive synchronized parallel restarts.
+
+## 5. Automated GKE Node Provisioning & Preparation
+- **Code Reference**: `scripts/docker-setup.sh`, `deploy/k8s/base/agentenv-daemonset.yaml`
+- **Ambiguity**: Running standard GKE Container-Optimized OS (COS) makes loading external kernel modules like `ublk_drv` or altering host sysctl parameters difficult, as the OS is read-only.
+- **Question**: Is there an official node initializer image or customized GKE Node Template configuration provided to automate the setup of KVM and `ublk_drv`? Or does AgentENV assume Ubuntu-based GKE worker nodes where kernel module addition is straightforward?
+
+## 6. Privileged Node DaemonSet & Multi-Tenant Security
+- **Code Reference**: `deploy/k8s/base/agentenv-daemonset.yaml`
+- **Ambiguity**: The `agentenv-node` DaemonSet pod is configured with `privileged: true` and shares the host PID and network namespaces to configure interfaces and mount ublk channels.
+- **Question**: What container security practices (e.g., AppArmor, Seccomp, or SELinux policies) are recommended to prevent a compromised runtime node pod from escalating permissions on the host? How is guest-to-host isolation guaranteed if the host directory `/var/lib/aenv` is directly mounted across pods?
