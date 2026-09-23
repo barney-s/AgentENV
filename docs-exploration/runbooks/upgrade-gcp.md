@@ -17,14 +17,14 @@ The executing identity requires:
   - `artifactregistry.repositories.uploadArtifacts` — to push the updated container images.
 
 ### Feasibility Checklist (Current Environment)
-- [✓] **IAM Owner Role** — **GRANTED** (The current identity `cnrm-barni-1.svc.id.goog` has `roles/owner` on GCP project `barni-cnrm-20260529`)
+- [✓] **IAM Owner Role** — **GRANTED** (The active credentials have `roles/owner` on the GCP project `${PROJECT_ID}`)
 - [✓] `gcloud` — present at `/usr/bin/gcloud`
 - [✓] `kubectl` — present at `/usr/bin/kubectl`
 - [✓] `make` — present at `/usr/bin/make`
 - [✓] `git` — present
 - [✓] `curl` — present
 - [✗] `docker` — **MISSING** (Install with `sudo apt-get update && sudo apt-get install -y docker.io` to compile and push images)
-- [✗] **GKE Cluster Connectivity** — **MISSING** (We are currently unauthorized to list cluster nodes on the target local cluster; you must authenticate to a real GKE cluster using `gcloud container clusters get-credentials`)
+- [✗] **GKE Cluster Connectivity** — **MISSING** (No active GKE clusters found in the target region `${REGION}`; you must create a cluster or retrieve credentials via `gcloud container clusters get-credentials`)
 
 ---
 
@@ -38,12 +38,16 @@ The executing identity requires:
 ## Steps
 
 ### 1. Configure GCP Project and GKE Context
-Define environment variables matching your target cluster and authenticate your session:
+Define environment variables matching your target cluster by sourcing `params.env` (where instance parameters are resolved at plan time from Settings and guidance):
 ```bash
-export PROJECT_ID="barni-cnrm-20260529"
-export REGION="us-central1"
-export GKE_CLUSTER="agentenv-cluster"
-export REPO_NAME="agentenv-registry"
+# Load instance parameters
+source params.env
+
+# Confirm environment variables are loaded
+echo "Project ID: ${PROJECT_ID}"
+echo "Region: ${REGION}"
+echo "GKE Cluster: ${GKE_CLUSTER}"
+echo "Repo Name: ${REPO_NAME}"
 
 gcloud config set project "${PROJECT_ID}"
 gcloud container clusters get-credentials "${GKE_CLUSTER}" --region "${REGION}"
