@@ -1,0 +1,39 @@
+steps:
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - 'build'
+      - '-f'
+      - 'deploy/docker/Dockerfile.gateway'
+      - '-t'
+      - '$_K8S_GATEWAY_IMAGE'
+      - '.'
+    env:
+      - 'DOCKER_BUILDKIT=1'
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - 'build'
+      - '-f'
+      - 'deploy/docker/Dockerfile.scheduler'
+      - '-t'
+      - '$_K8S_SCHEDULER_IMAGE'
+      - '.'
+    env:
+      - 'DOCKER_BUILDKIT=1'
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - 'build'
+      - '-f'
+      - 'deploy/docker/Dockerfile.agentenv'
+      - '-t'
+      - '$_K8S_RUNTIME_IMAGE'
+      - '.'
+    env:
+      - 'DOCKER_BUILDKIT=1'
+images:
+  - '$_K8S_GATEWAY_IMAGE'
+  - '$_K8S_SCHEDULER_IMAGE'
+  - '$_K8S_RUNTIME_IMAGE'
+options:
+  machineType: 'E2_HIGHCPU_8'
+  logging: CLOUD_LOGGING_ONLY
+timeout: '1800s'

@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# Build container images via Cloud Build (due to sandbox container unshare limits), fixed gcloud artifacts command, and robust kustomize image replacements
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -94,8 +95,8 @@ echo "Waiting for node initializer DaemonSet to complete rollout..."
 kubectl rollout status daemonset/agentenv-node-initializer -n kube-system --timeout=180s
 
 echo "=== Step 4: Create Artifact Registry and Configure Docker Authentication ==="
-if ! gcloud artifact repositories describe "${REPO_NAME}" --location="${REGION}" --project="${PROJECT_ID}" &>/dev/null; then
-  gcloud artifact repositories create "${REPO_NAME}" \
+if ! gcloud artifacts repositories describe "${REPO_NAME}" --location="${REGION}" --project="${PROJECT_ID}" &>/dev/null; then
+  gcloud artifacts repositories create "${REPO_NAME}" \
     --project="${PROJECT_ID}" \
     --repository-format=docker \
     --location="${REGION}" \
@@ -112,22 +113,51 @@ if ! gsutil ls -b "gs://${GCS_BUCKET}" &>/dev/null; then
   gsutil mb -p "${PROJECT_ID}" -l "${REGION}" "gs://${GCS_BUCKET}" || true
 fi
 
-echo "=== Step 6: Build and Push Container Images ==="
+echo "=== Step 6: Build and Push Container Images via Cloud Build ==="
 export REGISTRY="${REGISTRY}"
 export K8S_RUNTIME_IMAGE="${K8S_RUNTIME_IMAGE}"
 export K8S_GATEWAY_IMAGE="${K8S_GATEWAY_IMAGE}"
 export K8S_SCHEDULER_IMAGE="${K8S_SCHEDULER_IMAGE}"
 
-make k8s-build
-
-docker push "${K8S_RUNTIME_IMAGE}"
-docker push "${K8S_GATEWAY_IMAGE}"
-docker push "${K8S_SCHEDULER_IMAGE}"
+# Check if all images already exist in registry to avoid redundant builds
+if ! gcloud artifacts docker images describe "${K8S_RUNTIME_IMAGE}" &>/dev/null || \
+   ! gcloud artifacts docker images describe "${K8S_GATEWAY_IMAGE}" &>/dev/null || \
+   ! gcloud artifacts docker images describe "${K8S_SCHEDULER_IMAGE}" &>/dev/null; then
+  echo "Submitting Cloud Build job for AgentENV container images..."
+  gcloud builds submit \
+    --project="${PROJECT_ID}" \
+    --region="${REGION}" \
+    --config="${SCRIPT_DIR}/cloudbuild.yaml" \
+    --substitutions="_K8S_GATEWAY_IMAGE=${K8S_GATEWAY_IMAGE},_K8S_SCHEDULER_IMAGE=${K8S_SCHEDULER_IMAGE},_K8S_RUNTIME_IMAGE=${K8S_RUNTIME_IMAGE}" \
+    "${REPO_ROOT}"
+else
+  echo "All container images already exist in Artifact Registry."
+fi
 
 echo "=== Step 7: Update Kustomize Image References ==="
-sed -i "s#newName: agentenv-gateway#newName: ${K8S_GATEWAY_IMAGE}#" deploy/k8s/base/kustomization.yaml
-sed -i "s#newName: agentenv-scheduler#newName: ${K8S_SCHEDULER_IMAGE}#" deploy/k8s/base/kustomization.yaml
-sed -i "s#newName: agentenv-runtime#newName: ${K8S_RUNTIME_IMAGE}#" deploy/k8s/base/kustomization.yaml
+python3 -c '
+import re
+
+with open("deploy/k8s/base/kustomization.yaml", "r") as f:
+    content = f.read()
+
+images = {
+    "agentenv-gateway": "'"${K8S_GATEWAY_IMAGE}"'",
+    "agentenv-scheduler": "'"${K8S_SCHEDULER_IMAGE}"'",
+    "agentenv-runtime": "'"${K8S_RUNTIME_IMAGE}"'"
+}
+
+for name, full_image in images.items():
+    if ":" in full_image:
+        image_name, image_tag = full_image.rsplit(":", 1)
+    else:
+        image_name, image_tag = full_image, "latest"
+    pattern = rf"(- name:\s*{name}\s*\n\s*newName:\s*)\S+(\s*\n\s*newTag:\s*)\S+"
+    content = re.sub(pattern, rf"\g<1>{image_name}\g<2>{image_tag}", content)
+
+with open("deploy/k8s/base/kustomization.yaml", "w") as f:
+    f.write(content)
+'
 
 echo "=== Step 8: Apply Manifests to the GKE Cluster ==="
 export K8S_NAMESPACE="${K8S_NAMESPACE}"

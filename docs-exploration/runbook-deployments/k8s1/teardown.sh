@@ -17,7 +17,7 @@ echo "=== Teardown: Deleting Node Initializer DaemonSet ==="
 kubectl delete daemonset agentenv-node-initializer -n kube-system --ignore-not-found || true
 
 echo "=== Teardown: Deleting Artifact Registry Repository ==="
-gcloud artifact repositories delete "${REPO_NAME}" \
+gcloud artifacts repositories delete "${REPO_NAME}" \
   --project="${PROJECT_ID}" \
   --location="${REGION}" \
   --quiet || true
@@ -30,5 +30,8 @@ gcloud container clusters delete "${GKE_CLUSTER}" \
 
 echo "=== Teardown: Deleting Snapshot GCS Bucket ==="
 gsutil rm -r "gs://${GCS_BUCKET}" || true
+
+echo "=== Teardown: Restoring Repository Manifests ==="
+git checkout deploy/k8s/base/kustomization.yaml 2>/dev/null || true
 
 echo "=== Teardown Complete ==="
