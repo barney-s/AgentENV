@@ -36,8 +36,9 @@ Ensure you have your GCP project, zone, and GCE VM configuration variables ready
 2. **`ZONE`**: The GCP compute zone (e.g., `us-central1-a` or `us-east1-b`).
 3. **`VM_NAME`**: The name of the GCE VM instance (e.g., `agentenv-manual-host`).
 4. **`MACHINE_TYPE`**: GCE machine type (e.g., `n2-standard-4`). Must be Intel processor family (e.g., N2, N1, C2, C3) to support nested virtualization.
-5. **`IMAGE_FAMILY`**: Ubuntu 24.04 LTS (`ubuntu-2404-lts`) to get kernel 6.8+ natively out-of-the-box.
+5. **`IMAGE_FAMILY`**: Ubuntu 24.04 LTS (`ubuntu-2404-lts-amd64`) to get kernel 6.8+ natively out-of-the-box.
 6. **`IMAGE_PROJECT`**: Ubuntu OS images project (`ubuntu-os-cloud`).
+7. **Boot Disk Space**: A boot disk size of at least **50GB** is required because building the full AgentENV Rust workspace (including the large RocksDB C++ dependencies) requires substantial scratch space and exceeds the default GCE 10GB limit.
 
 ---
 
@@ -67,10 +68,13 @@ gcloud compute instances create "${VM_NAME}" \
     --image-family="${IMAGE_FAMILY}" \
     --image-project="${IMAGE_PROJECT}" \
     --enable-nested-virtualization \
+    --boot-disk-size=50GB \
     --metadata=startup-script="#!/bin/bash
+set -euo pipefail
 # Ensure compilation-essential and runtime dependencies are ready
 apt-get update
-apt-get install -y git build-essential pkg-config libssl-dev protobuf-compiler clang libclang-dev libprotobuf-dev ca-certificates curl e2fsprogs iproute2 iptables jq sudo umoci zstd setpriv
+apt-get install -y git build-essential pkg-config libssl-dev protobuf-compiler clang libclang-dev libprotobuf-dev ca-certificates curl e2fsprogs iproute2 iptables jq sudo umoci zstd
+echo 'done' > /var/run/startup-script-finished
 "
 ```
 

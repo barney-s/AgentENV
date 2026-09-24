@@ -1,4 +1,8 @@
 #!/bin/bash
+# Fixed: Updated IMAGE_FAMILY to ubuntu-2404-lts-amd64 because ubuntu-2404-lts is not a valid family view name in ubuntu-os-cloud
+# Fixed: Removed 'setpriv' from the apt-get package list because setpriv is part of util-linux and not a standalone package name on Ubuntu 24.04
+# Fixed: Added a sentinel file and updated the polling loop to prevent race condition when the startup script is not yet active on VM boot.
+# Fixed: Added --boot-disk-size=50GB to prevent 'No space left on device' errors when compiling native dependencies like RocksDB.
 set -euo pipefail
 
 # Determine script directory
@@ -29,11 +33,14 @@ gcloud compute instances create "${VM_NAME}" \
     --image-family="${IMAGE_FAMILY}" \
     --image-project="${IMAGE_PROJECT}" \
     --enable-nested-virtualization \
+    --boot-disk-size=50GB \
     --labels="repo-agent-instance=${RESOURCE_PREFIX}" \
     --metadata=startup-script="#!/bin/bash
+set -euo pipefail
 # Ensure compilation-essential and runtime dependencies are ready
 apt-get update
-apt-get install -y git build-essential pkg-config libssl-dev protobuf-compiler clang libclang-dev libprotobuf-dev ca-certificates curl e2fsprogs iproute2 iptables jq sudo umoci zstd setpriv
+apt-get install -y git build-essential pkg-config libssl-dev protobuf-compiler clang libclang-dev libprotobuf-dev ca-certificates curl e2fsprogs iproute2 iptables jq sudo umoci zstd
+echo 'done' > /var/run/startup-script-finished
 "
 
 # Wait for SSH to be ready
@@ -53,11 +60,16 @@ done
 # Wait for startup script to finish
 echo "Waiting for startup script to finish installing dependencies..."
 gcloud compute ssh "${VM_NAME}" --zone="${ZONE}" --command="
-    while systemctl is-active google-startup-scripts.service >/dev/null 2>&1; do
+    for i in {1..60}; do
+        if [ -f /var/run/startup-script-finished ]; then
+            echo 'Startup-script has completed successfully!'
+            exit 0
+        fi
         echo 'Startup-script is still running, waiting 10 seconds...'
         sleep 10
     done
-    echo 'Startup-script has completed successfully!'
+    echo 'Startup-script did not finish within 10 minutes.' >&2
+    exit 1
 "
 
 # Create helper vm_setup.sh script to execute inside the VM
