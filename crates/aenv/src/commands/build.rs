@@ -17,6 +17,12 @@ use crate::client::{
 use crate::progress::BuildProgress;
 
 #[derive(Clone, ClapArgs)]
+#[command(after_help = "\
+Examples:
+  aenv build --name my-ubuntu .
+  aenv build --name my-python ./my-python
+  aenv build --name my-app -f ./my-app/Dockerfile.custom ./my-app
+")]
 pub struct Args {
     /// Local build context directory
     context: PathBuf,
@@ -52,6 +58,28 @@ pub struct Args {
     /// Build deadline in seconds, plus 10 minutes for provisioning and publication
     #[arg(long, default_value_t = 3600, value_parser = clap::value_parser!(u32).range(1..=86400))]
     timeout: u32,
+}
+
+/// Build the executor bundled with the Codex command using the normal builder.
+#[cfg(target_os = "linux")]
+pub(super) fn codex_template(context: PathBuf, name: String) -> Result<()> {
+    run(Args {
+        context,
+        dockerfile: None,
+        name,
+        resources: super::CpuMemoryArgs {
+            cpu_count: Some(2),
+            memory_mb: Some(1024),
+        },
+        start_cmd: Some(String::new()),
+        ready_cmd: Some("true".into()),
+        build_args: vec![],
+        secret: vec![],
+        no_cache: false,
+        buildctl: None,
+        progress: "auto".into(),
+        timeout: 3600,
+    })
 }
 
 pub fn run(mut args: Args) -> Result<()> {

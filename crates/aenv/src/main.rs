@@ -21,6 +21,8 @@ struct Cli {
 enum Cmd {
     /// Save server URL and API key
     Auth,
+    /// Work on a project with native Codex in an AgentENV sandbox
+    Codex(commands::codex::Args),
     /// Build a template from a base image.
     /// Waits for the build to complete by default; exits non-zero on failure. Use -d to return immediately.
     Pull(commands::pull::Args),
@@ -62,11 +64,22 @@ enum Cmd {
     Volume(commands::volume::Args),
 }
 
+/// Chooses rustls's crypto provider for the process. reqwest and ureq enable
+/// different providers (aws-lc-rs and ring), so rustls cannot pick a default
+/// on its own, and a connection that relies on the default -- the `wss://`
+/// BuildKit tunnel of `aenv build` -- panics instead of connecting.
+fn install_crypto_provider() {
+    // Fails only when a provider is already installed, which serves as well.
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+}
+
 fn main() -> Result<()> {
+    install_crypto_provider();
     CompleteEnv::with_factory(Cli::command).complete();
     let cli = Cli::parse();
     match cli.cmd {
         Cmd::Auth => commands::auth::run(),
+        Cmd::Codex(a) => commands::codex::run(a),
         Cmd::Pull(a) => commands::pull::run(a),
         Cmd::Build(a) => commands::build::run(*a),
         Cmd::Start(a) => commands::start::run(a),
