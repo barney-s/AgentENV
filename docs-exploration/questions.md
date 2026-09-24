@@ -26,8 +26,7 @@ During exploration of the AgentENV codebase, a few architectural nuances and ope
 
 ## 5. Automated GKE Node Provisioning & Preparation
 - **Code Reference**: `scripts/docker-setup.sh`, `deploy/k8s/base/agentenv-daemonset.yaml`
-- **Ambiguity**: Running standard GKE Container-Optimized OS (COS) makes loading external kernel modules like `ublk_drv` or altering host sysctl parameters difficult, as the OS is read-only.
-- **Question**: Is there an official node initializer image or customized GKE Node Template configuration provided to automate the setup of KVM and `ublk_drv`? Or does AgentENV assume Ubuntu-based GKE worker nodes where kernel module addition is straightforward?
+- **Resolution**: GKE worker nodes must use Ubuntu (`ubuntu_containerd`) as their OS image, because Google Container-Optimized OS (COS) has a read-only root filesystem and restricts loading kernel modules and altering sysctl parameters. The initialization is automated via a node-initializer DaemonSet using `nsenter` to run `scripts/docker-setup.sh` on the host, or can be run manually via an SSH loop.
 
 ## 6. Privileged Node DaemonSet & Multi-Tenant Security
 - **Code Reference**: `deploy/k8s/base/agentenv-daemonset.yaml`
