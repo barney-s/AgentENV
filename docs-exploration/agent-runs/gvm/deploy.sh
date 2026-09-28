@@ -47,6 +47,7 @@ apt-get install -y --no-install-recommends \
     pkg-config \
     libssl-dev \
     protobuf-compiler \
+    libprotobuf-dev \
     clang \
     libclang-dev \
     git \
@@ -58,6 +59,14 @@ apt-get install -y --no-install-recommends \
     socat \
     zstd \
     ca-certificates
+
+# Create runtime system group and user
+if ! getent group aenv >/dev/null 2>&1; then
+    groupadd --system aenv
+fi
+if ! id -u aenv >/dev/null 2>&1; then
+    useradd --system --gid aenv --home-dir /var/lib/aenv --no-create-home --shell /usr/sbin/nologin aenv
+fi
 
 # Load and persist ublk_drv kernel module
 modprobe ublk_drv ublks_max=4096 || true
@@ -86,6 +95,20 @@ until gcloud compute ssh "${INSTANCE_NAME}" --project="${PROJECT}" --zone="${ZON
   sleep 5
 done
 
+echo "Waiting for background startup script and package installation to complete..."
+gcloud compute ssh "${INSTANCE_NAME}" --project="${PROJECT}" --zone="${ZONE}" --command='bash -s' <<'EOF'
+set -euo pipefail
+# Wait until google-startup-scripts service finishes
+while systemctl is-active --quiet google-startup-scripts.service; do
+    echo "Startup script is still running..."
+    sleep 3
+done
+while sudo fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1 || sudo fuser /var/lib/apt/lists/lock >/dev/null 2>&1; do
+    echo "Waiting for apt/dpkg lock..."
+    sleep 3
+done
+EOF
+
 echo "=== Step 4: Build AgentENV from Source on the VM ==="
 gcloud compute ssh "${INSTANCE_NAME}" --project="${PROJECT}" --zone="${ZONE}" --command='bash -s' <<'EOF'
 set -euxo pipefail
@@ -104,13 +127,20 @@ if [[ ! -d "AgentENV" ]]; then
 fi
 cd AgentENV
 
-# Build release artifacts
-make release
-make install-aenv
-make install-ublk PROFILE=release
+# Build release artifacts with standard protobuf include path
+export PROTOC_INCLUDE=/usr/include
+cargo build --release -p agentenv --bin server -p aenv --bin aenv -p uvm-ublk-daemon --bin uvm-ublk-daemon
 
-# Verify binaries
+# Install compiled binaries to standard system locations
+sudo install -d /usr/local/bin
+sudo install -m 0755 target/release/aenv /usr/local/bin/aenv
+sudo install -m 0755 target/release/server /usr/local/bin/server
+sudo install -d /var/lib/aenv/ublk
+sudo install -m 0755 target/release/uvm-ublk-daemon /var/lib/aenv/ublk/uvm-ublk-daemon
+
+# Verify binary availability
 /usr/local/bin/aenv --version
+/usr/local/bin/server --help
 EOF
 
 echo "=== Step 5: Configure Host and Provision Runtime Assets ==="
@@ -118,11 +148,30 @@ gcloud compute ssh "${INSTANCE_NAME}" --project="${PROJECT}" --zone="${ZONE}" --
 set -euxo pipefail
 cd AgentENV
 
-# Configure host environment permissions, ublk, and forwarding
-sudo ./target/release/server --setup-host
+# Ensure runtime user and group exist
+if ! getent group aenv >/dev/null 2>&1; then
+    sudo groupadd --system aenv
+fi
+if ! id -u aenv >/dev/null 2>&1; then
+    sudo useradd --system --gid aenv --home-dir /var/lib/aenv --no-create-home --shell /usr/sbin/nologin aenv
+fi
 
-# Provision Firecracker binary, guest kernel, and rootfs dependencies
-sudo ./target/release/server --setup-only
+# Prepare /var/lib/aenv directory and configuration
+sudo install -d -o aenv -g aenv -m 0750 /var/lib/aenv
+sudo install -d -o aenv -g aenv -m 0750 /var/lib/aenv/config
+sudo install -o aenv -g aenv -m 0640 config/default.toml /var/lib/aenv/config/config.toml
+
+# Provision runtime assets (downloads dependencies first)
+sudo /usr/local/bin/server --setup-only --config /var/lib/aenv/config/config.toml || true
+
+# Configure host environment permissions, ublk, and overlaybd system config
+sudo /usr/local/bin/server --setup-host --runtime-user aenv --runtime-group aenv --config /var/lib/aenv/config/config.toml
+
+# Finalize image resolution and tools provisioning
+sudo /usr/local/bin/server --setup-only --config /var/lib/aenv/config/config.toml
+
+# Ensure runtime state directory permissions
+sudo chown -R aenv:aenv /var/lib/aenv
 EOF
 
 echo "=== Step 6: Start AgentENV Systemd Service ==="
@@ -135,16 +184,25 @@ Description=AgentENV Server
 After=network.target
 
 [Service]
-Type=simple
-User=root
-WorkingDirectory=/root/AgentENV
+User=aenv
+Group=aenv
+SupplementaryGroups=kvm
 Environment="AENV_HOME_PATH=/var/lib/aenv"
+Environment="AENV_CONFIG_PATH=/var/lib/aenv/config/config.toml"
 Environment="API_ADDR=0.0.0.0:8000"
-ExecStart=/root/AgentENV/target/release/server
+ExecStart=/usr/local/bin/server
+RuntimeDirectory=aenv
+RuntimeDirectoryMode=0750
+AmbientCapabilities=CAP_NET_ADMIN CAP_SYS_ADMIN
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_SYS_ADMIN
+NoNewPrivileges=true
+UMask=0027
+LimitNOFILE=1048576
+LimitMEMLOCK=infinity
 Restart=always
 RestartSec=3
-LimitNOFILE=65536
-LimitMEMLOCK=infinity
+KillMode=process
+TimeoutStopSec=30
 
 [Install]
 WantedBy=multi-user.target
@@ -159,20 +217,33 @@ EOF
 echo "=== Step 7: Verify Server Health and Endpoints ==="
 gcloud compute ssh "${INSTANCE_NAME}" --project="${PROJECT}" --zone="${ZONE}" --command='bash -s' <<'EOF'
 set -euo pipefail
-sleep 3
-echo "Checking /health endpoint:"
+sleep 5
+echo "Checking local /health endpoint:"
 curl -fsSL http://127.0.0.1:8000/health
 echo ""
 
 API_KEY="$(sudo cat /var/lib/aenv/secrets/api-key)"
-echo "Retrieved API key."
+echo "Retrieved API key: ${API_KEY:0:8}..."
 
-echo "Checking /sandboxes endpoint:"
+echo "Checking local /sandboxes endpoint:"
 curl -fsSL -H "X-API-Key: ${API_KEY}" http://127.0.0.1:8000/sandboxes
+echo ""
+
+echo "Configuring aenv CLI credentials..."
+mkdir -p "$HOME/.config/aenv"
+cat <<CREDS > "$HOME/.config/aenv/credentials"
+url = "http://127.0.0.1:8000"
+api_key = "${API_KEY}"
+CREDS
+chmod 600 "$HOME/.config/aenv/credentials"
+
+echo "Checking aenv list CLI output:"
+/usr/local/bin/aenv list
 echo ""
 EOF
 
 VM_EXTERNAL_IP="$(gcloud compute instances describe "${INSTANCE_NAME}" --project="${PROJECT}" --zone="${ZONE}" --format='get(networkInterfaces[0].accessConfigs[0].natIP)')"
 echo "Testing external connectivity to http://${VM_EXTERNAL_IP}:8000/health..."
 curl -fsSL "http://${VM_EXTERNAL_IP}:8000/health"
+echo ""
 echo "AgentENV server deployment complete and healthy at http://${VM_EXTERNAL_IP}:8000"

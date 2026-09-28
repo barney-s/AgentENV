@@ -58,7 +58,7 @@ gcloud compute firewall-rules create "${FIREWALL_RULE_NAME}" \
 
 ### Step 2: Provision GCE VM with Nested Virtualization
 
-Create an `n2-standard-4` Compute Engine instance running Ubuntu 24.04 LTS (kernel 6.8+) with nested virtualization enabled (`--enable-nested-virtualization`). Nested virtualization is mandatory for Firecracker microVMs to execute with KVM acceleration.
+Create an `n2-standard-4` Compute Engine instance running Ubuntu 24.04 LTS (kernel 6.8+) with nested virtualization enabled (`--enable-nested-virtualization`). Nested virtualization is mandatory for Firecracker microVMs to execute with KVM acceleration. The startup script installs build/runtime packages (including `libprotobuf-dev` for standard protobuf headers), creates the system `aenv` account, loads the `ublk_drv` module, and configures kernel networking parameters.
 
 ```bash
 gcloud compute instances create "${INSTANCE_NAME}" \
@@ -86,6 +86,7 @@ apt-get install -y --no-install-recommends \
     pkg-config \
     libssl-dev \
     protobuf-compiler \
+    libprotobuf-dev \
     clang \
     libclang-dev \
     git \
@@ -97,6 +98,14 @@ apt-get install -y --no-install-recommends \
     socat \
     zstd \
     ca-certificates
+
+# Create runtime system group and user
+if ! getent group aenv >/dev/null 2>&1; then
+    groupadd --system aenv
+fi
+if ! id -u aenv >/dev/null 2>&1; then
+    useradd --system --gid aenv --home-dir /var/lib/aenv --no-create-home --shell /usr/sbin/nologin aenv
+fi
 
 # Load and persist ublk_drv kernel module
 modprobe ublk_drv ublks_max=4096 || true
@@ -118,7 +127,7 @@ sysctl --system || true
 
 ### Step 3: Wait for Instance SSH and Readiness
 
-Wait for the instance to complete startup and become accessible via Google Cloud SSH:
+Wait for the instance to complete startup, become accessible via Google Cloud SSH, and ensure background startup script package installation has finished before starting build tasks:
 
 ```bash
 echo "Waiting for instance ${INSTANCE_NAME} to become reachable..."
@@ -126,11 +135,24 @@ until gcloud compute ssh "${INSTANCE_NAME}" --project="${PROJECT}" --zone="${ZON
   echo "Retrying SSH connection in 5 seconds..."
   sleep 5
 done
+
+echo "Waiting for background startup script and package installation to complete..."
+gcloud compute ssh "${INSTANCE_NAME}" --project="${PROJECT}" --zone="${ZONE}" --command='bash -s' <<'EOF'
+set -euo pipefail
+while systemctl is-active --quiet google-startup-scripts.service; do
+    echo "Startup script is still running..."
+    sleep 3
+done
+while sudo fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1 || sudo fuser /var/lib/apt/lists/lock >/dev/null 2>&1; do
+    echo "Waiting for apt/dpkg lock..."
+    sleep 3
+done
+EOF
 ```
 
 ### Step 4: Build AgentENV from Source on the VM
 
-SSH into the instance, install Rust, clone the repository, compile release binaries, and install the CLI and UVM daemon:
+SSH into the instance, install the Rust toolchain, clone the repository, set `PROTOC_INCLUDE=/usr/include` for `prost-build`, compile the release binaries (`server`, `aenv`, `uvm-ublk-daemon`), and install them to standard system locations:
 
 ```bash
 gcloud compute ssh "${INSTANCE_NAME}" --project="${PROJECT}" --zone="${ZONE}" --command='bash -s' <<'EOF'
@@ -150,36 +172,62 @@ if [[ ! -d "AgentENV" ]]; then
 fi
 cd AgentENV
 
-# Build release artifacts
-make release
-make install-aenv
-make install-ublk PROFILE=release
+# Build release artifacts with standard protobuf include path
+export PROTOC_INCLUDE=/usr/include
+cargo build --release -p agentenv --bin server -p aenv --bin aenv -p uvm-ublk-daemon --bin uvm-ublk-daemon
 
-# Verify binaries
+# Install compiled binaries to standard system locations
+sudo install -d /usr/local/bin
+sudo install -m 0755 target/release/aenv /usr/local/bin/aenv
+sudo install -m 0755 target/release/server /usr/local/bin/server
+sudo install -d /var/lib/aenv/ublk
+sudo install -m 0755 target/release/uvm-ublk-daemon /var/lib/aenv/ublk/uvm-ublk-daemon
+
+# Verify binary availability
 /usr/local/bin/aenv --version
+/usr/local/bin/server --help
 EOF
 ```
 
 ### Step 5: Configure Host and Provision Runtime Assets
 
-Run host provisioning and runtime asset staging using the compiled `server` binary:
+Prepare `/var/lib/aenv/config/config.toml`, download Firecracker / OverlayBD / guest kernel assets with `--setup-only`, provision ublk access rules and system overlaybd config with `--setup-host`, and resolve the base tools image:
 
 ```bash
 gcloud compute ssh "${INSTANCE_NAME}" --project="${PROJECT}" --zone="${ZONE}" --command='bash -s' <<'EOF'
 set -euxo pipefail
 cd AgentENV
 
-# Configure host environment permissions, ublk, and forwarding
-sudo ./target/release/server --setup-host
+# Ensure runtime user and group exist
+if ! getent group aenv >/dev/null 2>&1; then
+    sudo groupadd --system aenv
+fi
+if ! id -u aenv >/dev/null 2>&1; then
+    useradd --system --gid aenv --home-dir /var/lib/aenv --no-create-home --shell /usr/sbin/nologin aenv
+fi
 
-# Provision Firecracker binary, guest kernel, and rootfs dependencies
-sudo ./target/release/server --setup-only
+# Prepare /var/lib/aenv directory and configuration
+sudo install -d -o aenv -g aenv -m 0750 /var/lib/aenv
+sudo install -d -o aenv -g aenv -m 0750 /var/lib/aenv/config
+sudo install -o aenv -g aenv -m 0640 config/default.toml /var/lib/aenv/config/config.toml
+
+# Provision runtime assets (downloads dependencies first)
+sudo /usr/local/bin/server --setup-only --config /var/lib/aenv/config/config.toml || true
+
+# Configure host environment permissions, ublk, and overlaybd system config
+sudo /usr/local/bin/server --setup-host --runtime-user aenv --runtime-group aenv --config /var/lib/aenv/config/config.toml
+
+# Finalize image resolution and tools provisioning
+sudo /usr/local/bin/server --setup-only --config /var/lib/aenv/config/config.toml
+
+# Ensure runtime state directory permissions
+sudo chown -R aenv:aenv /var/lib/aenv
 EOF
 ```
 
 ### Step 6: Start AgentENV Systemd Service
 
-Create and start the `aenv` systemd service so the server runs reliably in the background:
+Create and start the `aenv` systemd service running as non-root user `aenv` with required network and system capabilities (`CAP_NET_ADMIN`, `CAP_SYS_ADMIN`) and access to the `kvm` group:
 
 ```bash
 gcloud compute ssh "${INSTANCE_NAME}" --project="${PROJECT}" --zone="${ZONE}" --command='bash -s' <<'EOF'
@@ -191,16 +239,25 @@ Description=AgentENV Server
 After=network.target
 
 [Service]
-Type=simple
-User=root
-WorkingDirectory=/root/AgentENV
+User=aenv
+Group=aenv
+SupplementaryGroups=kvm
 Environment="AENV_HOME_PATH=/var/lib/aenv"
+Environment="AENV_CONFIG_PATH=/var/lib/aenv/config/config.toml"
 Environment="API_ADDR=0.0.0.0:8000"
-ExecStart=/root/AgentENV/target/release/server
+ExecStart=/usr/local/bin/server
+RuntimeDirectory=aenv
+RuntimeDirectoryMode=0750
+AmbientCapabilities=CAP_NET_ADMIN CAP_SYS_ADMIN
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_SYS_ADMIN
+NoNewPrivileges=true
+UMask=0027
+LimitNOFILE=1048576
+LimitMEMLOCK=infinity
 Restart=always
 RestartSec=3
-LimitNOFILE=65536
-LimitMEMLOCK=infinity
+KillMode=process
+TimeoutStopSec=30
 
 [Install]
 WantedBy=multi-user.target
@@ -217,22 +274,34 @@ EOF
 
 ### Step 7: Verify Server Health and Endpoints
 
-Check that the server responds to local and remote health requests, retrieve the API key, and test sandbox listing:
+Check that the server responds to local and remote health requests, retrieve the API key, test sandbox listing via curl and the `aenv` CLI:
 
 ```bash
 # Verify health via SSH on the VM
 gcloud compute ssh "${INSTANCE_NAME}" --project="${PROJECT}" --zone="${ZONE}" --command='bash -s' <<'EOF'
 set -euo pipefail
-sleep 3
-echo "Checking /health endpoint:"
+sleep 5
+echo "Checking local /health endpoint:"
 curl -fsSL http://127.0.0.1:8000/health
 echo ""
 
 API_KEY="$(sudo cat /var/lib/aenv/secrets/api-key)"
-echo "Retrieved API key."
+echo "Retrieved API key: ${API_KEY:0:8}..."
 
-echo "Checking /sandboxes endpoint:"
+echo "Checking local /sandboxes endpoint:"
 curl -fsSL -H "X-API-Key: ${API_KEY}" http://127.0.0.1:8000/sandboxes
+echo ""
+
+echo "Configuring aenv CLI credentials..."
+mkdir -p "$HOME/.config/aenv"
+cat <<CREDS > "$HOME/.config/aenv/credentials"
+url = "http://127.0.0.1:8000"
+api_key = "${API_KEY}"
+CREDS
+chmod 600 "$HOME/.config/aenv/credentials"
+
+echo "Checking aenv list CLI output:"
+/usr/local/bin/aenv list
 echo ""
 EOF
 
@@ -240,6 +309,7 @@ EOF
 VM_EXTERNAL_IP="$(gcloud compute instances describe "${INSTANCE_NAME}" --project="${PROJECT}" --zone="${ZONE}" --format='get(networkInterfaces[0].accessConfigs[0].natIP)')"
 echo "Testing external connectivity to http://${VM_EXTERNAL_IP}:8000/health..."
 curl -fsSL "http://${VM_EXTERNAL_IP}:8000/health"
+echo ""
 echo "AgentENV server is healthy and accessible at http://${VM_EXTERNAL_IP}:8000"
 ```
 
